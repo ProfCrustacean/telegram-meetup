@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Telegram Meet‑up Scheduler</title>
+  <style>
+    body {font-family: system-ui, sans-serif; max-width: 760px; margin: auto; padding: 1rem; line-height: 1.5;}
+    h1 {font-size: 1.8rem; margin-bottom: 0.5rem;}
+    input {padding: 0.4rem 0.6rem; font-size: 1rem; margin-right: 0.5rem;}
+    button {padding: 0.4rem 0.8rem; font-size: 1rem; cursor: pointer;}
+    #resetBtn {opacity: 0.35; font-size: 0.85rem; margin-left: 0.5rem;}
+    ul {list-style: square inside; margin-top: 0.25rem; padding-left: 1rem;}
+    .hidden {display: none !important;}
+    #scheduleOutput > div {margin-top: 1rem; padding: 0.75rem 1rem; border: 1px solid #ddd; border-radius: 0.5rem; background: #fafafa;}
+    #scheduleOutput ul {list-style: disc inside;}
+  </style>
+</head>
+<body>
+  <h1>Telegram Meet‑up Scheduler</h1>
+  <section id="signupSection">
+    <h2>Sign up</h2>
+    <form id="signupForm">
+      <label>
+        Telegram @username
+        <input id="usernameInput" placeholder="@handle" pattern="^@?[A-Za-z0-9_]{5,}$" required />
+      </label>
+      <button type="submit">I'm in</button>
+    </form>
+    <p id="signupMsg"></p>
+    <h3>Current sign‑ups (<span id="count">0</span>)</h3>
+    <ul id="signupList"></ul>
+  </section>
+
+  <section id="adminSection" class="hidden">
+    <button id="generateBtn">Close enrolment &amp; generate schedule</button>
+    <button id="resetBtn">Reset all</button>
+  </section>
+
+  <section id="scheduleSection" class="hidden">
+    <h2>Schedule</h2>
+    <div id="scheduleOutput"></div>
+    <button id="copyBtn">Copy to clipboard</button>
+  </section>
+
+  <script>
+    // ───────────────────────────────────────────────────────────────
+    // FILL‑IN VALUES (already done for you)
+    // ───────────────────────────────────────────────────────────────
+    const GIST_ID      = "a8a69ba0102df4927805a250de3479fd";          // ← your gist ID
+    const GITHUB_TOKEN = "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";  // ← your token (keep private!)
+    const ADMIN_CODE   = "secret123";                                 // visit ?code=secret123 for admin view
+
+    const isAdmin = new URLSearchParams(location.search).get("code") === ADMIN_CODE;
+
+    // ----- GitHub helpers -----
+    const headers = {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+    };
+
+    const BLANK_DATA = { signups: [], schedule: null, closed: false };
+    let data = structuredClone(BLANK_DATA);
+
+    async function loadData() {
+      try {
+        const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, { headers });
+        if (!res.ok) throw new Error(`GitHub API error – ${res.status}`);
+        const gist = await res.json();
+        if (!gist.files || !gist.files["data.json"]) {
+          console.warn("`data.json` not found in gist – creating it now");
+          await initialiseDataFile();
+        } else {
+          const content = gist.files["data.json"].content;
+          try { data = JSON.parse(content); }
+          catch { console.error("Corrupt JSON in gist – resetting"); await initialiseDataFile(); }
+        }
+      } catch (err) {
+        alert("Could not load from GitHub. Check credentials. Falling back to demo mode.");
+        console.error(err);
+        data = structuredClone(BLANK_DATA);
+      }
+      render();
+    }
+
+    async function initialiseDataFile() {
+      const body = { files: { "data.json": { content: JSON.stringify(BLANK_DATA, null, 2) } } };
+      await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+        method: "PATCH", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      data = structuredClone(BLANK_DATA);
+    }
+
+    async function saveData() {
+      try {
+        const body = { files: { "data.json": { content: JSON.stringify(data, null, 2) } } };
+        const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+          method: "PATCH", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`GitHub API error – ${res.status}`);
+      } catch (err) {
+        alert("Failed to save to GitHub – see console for details."); console.error(err);
+      }
+    }
+
+    // ----- DOM helpers -----
+    const $ = (id) => document.getElementById(id);
+
+    function render() {
+      $("signupList").innerHTML = data.signups.map((u) => `<li>${u}</li>`).join("");
+      $("count").textContent = data.signups.length;
+      $("signupForm").parentElement.classList.toggle("hidden", data.closed);
+      $("adminSection").classList.toggle("hidden", !isAdmin);
+      if (data.schedule) { $("scheduleSection").classList.remove("hidden"); displaySchedule(); }
+      else                { $("scheduleSection").classList.add("hidden"); }
+    }
+
+    $("signupForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const raw = $("usernameInput").value.trim();
+      const handle = raw.startsWith("@") ? raw : "@" + raw;
+      if (!data.signups.includes(handle)) { data.signups.push(handle); await saveData(); $("signupMsg").textContent = "Signed up! 🎉"; }
+      else { $("signupMsg").textContent = "You're already on the list."; }
+      e.target.reset(); render();
+    });
+
+    $("generateBtn").addEventListener("click", async () => {
+      if (!confirm("Close enrolment and generate the schedule now?")) return;
+      if (data.signups.length < 2) { alert("Need at least 2 participants."); return; }
+      data.closed = true; data.schedule = generateRounds(data.signups, 5); await saveData(); render();
+    });
+
+    $("resetBtn").addEventListener("click", async () => {
+      if (!confirm("This wipes everything – continue?")) return;
+      data = structuredClone(BLANK_DATA); await saveData(); render();
+    });
+
+    $("copyBtn").addEventListener("click", () => {
+      navigator.clipboard.writeText(formatForTelegram(data.schedule))
+        .then(() => alert("Copied! Paste in Telegram ✌️"));
+    });
+
+    function generateRounds(players, maxRounds) {
+      const people = [...players]; if (people.length % 2 === 1) people.push(null);
+      const n = people.length, rounds = [];
+      for (let r = 0; r < Math.min(maxRounds, n - 1); r++) {
+        const pairs = [];
+        for (let i = 0; i < n / 2; i++) {
+          const a = people[i], b = people[n - 1 - i]; if (a && b) pairs.push([a, b]);
+        }
+        rounds.push(pairs); people.splice(1, 0, people.pop());
+      }
+      return rounds;
+    }
+
+    function displaySchedule() {
+      const box = $("scheduleOutput"); box.innerHTML = "";
+      data.schedule.forEach((round, idx) => {
+        const div = document.createElement("div"); div.innerHTML = `<strong>Round ${idx + 1}</strong>`;
+        const ul = document.createElement("ul");
+        round.forEach(([a, b]) => { const li = document.createElement("li"); li.textContent = `${a} 🤝 ${b}`; ul.appendChild(li); });
+        div.appendChild(ul); box.appendChild(div);
+      });
+    }
+
+    const formatForTelegram = (schedule) => schedule.map((round, idx) => `Round ${idx + 1}\n` + round.map(([a, b]) => `- ${a} 🤝 ${b}`).join("\n")).join("\n\n");
+
+    loadData();
+  </script>
+</body>
+</html>
